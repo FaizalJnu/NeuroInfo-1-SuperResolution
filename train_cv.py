@@ -94,15 +94,54 @@ class MRIDataset(Dataset):
         return img_stack, target_slice
 
 # TRANSFORMATIONS
+# --- SAFE TRANSFORMS ---
+# train_aug = A.Compose([
+#     # 1. Geometry #type: ignore
+#     A.PadIfNeeded(min_height=CFG['img_size'], min_width=CFG['img_size'], border_mode=cv2.BORDER_CONSTANT, value=0),
+#     A.RandomCrop(height=CFG['img_size'], width=CFG['img_size']),
+#     A.HorizontalFlip(p=0.5),
+#     A.VerticalFlip(p=0.5),
+#     A.RandomRotate90(p=0.5),
+    
+#     # 2. Physics (Safe Mode)
+#     # Add noise first
+#     A.GaussNoise(var_limit=(0.001, 0.01), p=0.5),
+    
+#     # CRITICAL: Clip values to [0, 1] BEFORE Gamma to prevent NaNs
+#     A.ToFloat(max_value=1.0), 
+    
+#     # Now it's safe to run Gamma
+#     A.RandomGamma(gamma_limit=(80, 120), p=0.5),
+#     A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
+    
+#     # 3. Final Format
+#     ToTensorV2()
+# ])
+
+# --- SAFE TRANSFORMS ---
+# --- SAFE TRANSFORMS ---
 train_aug = A.Compose([
+    # 1. Geometry (Safe)
     A.PadIfNeeded(min_height=CFG['img_size'], min_width=CFG['img_size'], border_mode=cv2.BORDER_CONSTANT, value=0),
     A.RandomCrop(height=CFG['img_size'], width=CFG['img_size']),
     A.HorizontalFlip(p=0.5),
     A.VerticalFlip(p=0.5),
     A.RandomRotate90(p=0.5),
+    
+    # 2. Add Noise (This creates values < 0.0 and > 1.0)
+    A.GaussNoise(var_limit=(0.001, 0.01), p=0.5),
+    
+    # 3. CRITICAL: Custom Clip using Lambda
+    # This forces all pixels to stay strictly between 0.0 and 1.0
+    A.Lambda(image=lambda x, **kwargs: np.clip(x, 0, 1)),
+    
+    # 4. Intensity Transforms (Now safe because input is [0, 1])
+    A.RandomGamma(gamma_limit=(80, 120), p=0.5),
+    A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
+    
+    # 5. Final Tensor Conversion
     ToTensorV2()
-]) # type: ignore
-
+])
 val_aug = A.Compose([
     A.PadIfNeeded(min_height=CFG['img_size'], min_width=CFG['img_size'], border_mode=cv2.BORDER_CONSTANT, value=0),
     ToTensorV2()

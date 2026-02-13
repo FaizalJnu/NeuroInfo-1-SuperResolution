@@ -208,8 +208,10 @@ __marimo__/
 
 *.pth
 *.csv
-*zip
+*.zip
 
 /test
 /train
+
+/data
 
