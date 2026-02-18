@@ -215,3 +215,8 @@ __marimo__/
 
 /data
 
+/train_*
+/IXI*
+/brain_*
+/mri-*
+

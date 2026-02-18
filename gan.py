@@ -5,13 +5,14 @@ import nibabel as nib
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from tqdm import tqdm
 from scipy.ndimage import zoom
 import segmentation_models_pytorch as smp
 import cv2
+from pytorch_msssim import SSIM, MS_SSIM
 
 # --- CONFIGURATION ---
 CFG = {
@@ -22,11 +23,32 @@ CFG = {
     'img_size': 256,
     'lambda_adv': 0.01,  # Weight for GAN loss (Texture)
     'lambda_l1': 1.0,    # Weight for Pixel loss (Structure)
+    'lambda_content': 1.0, # Weight for Perceptual loss (Optional
     'device': 'cuda' if torch.cuda.is_available() else 'cpu',
-    'pretrained_unet': 'unet_25d_epoch15.pth' # <--- PATH TO YOUR BEST MODEL
+    'pretrained_unet': 'NewGan.pth' # <--- PATH TO YOUR BEST MODEL
 }
-
 print(f"Running GAN Training on: {CFG['device']}")
+
+class CombinedLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # win_size=11 and sigma=1.5 are standard for MS-SSIM
+        self.msssim = MS_SSIM(
+            data_range=1.0, 
+            size_average=True, 
+            channel=1, 
+            win_size=11
+        )
+        self.l1 = nn.L1Loss()
+
+    def forward(self, pred, target):
+        # MS-SSIM returns 1 for perfect match, so we use (1 - msssim) to minimize loss
+        # Note: MS-SSIM can sometimes return NaN if the image is too small 
+        # (needs to be at least 160x160 for 5 scales)
+        ms_ssim_loss = 1 - self.msssim(pred, target)
+        l1_loss = self.l1(pred, target)
+        
+        return 0.8 * ms_ssim_loss + 0.2 * l1_loss
 
 # --- 1. DATASET & TRANSFORMS (Standardized) ---
 class MRIDataset(Dataset):
@@ -81,15 +103,18 @@ class MRIDataset(Dataset):
             target = augmented['mask'].permute(2, 0, 1)
 
         return img_stack, target
+    
+def clip_image(image, **kwargs):
+    return np.clip(image, 0, 1)
 
 # Safe Augmentations
 train_aug = A.Compose([
-    A.PadIfNeeded(min_height=CFG['img_size'], min_width=CFG['img_size'], border_mode=cv2.BORDER_CONSTANT, value=0),
+    A.PadIfNeeded(min_height=CFG['img_size'], min_width=CFG['img_size'], border_mode=cv2.BORDER_CONSTANT),
     A.RandomCrop(height=CFG['img_size'], width=CFG['img_size']),
     A.HorizontalFlip(p=0.5),
     A.VerticalFlip(p=0.5),
-    A.GaussNoise(var_limit=(0.001, 0.005), p=0.5), # Light noise for GAN
-    A.Lambda(image=lambda x, **kwargs: np.clip(x, 0, 1)), # Clip safety
+    A.GaussNoise(std_range=(0.001, 0.005), p=0.5), # Light noise for GAN
+    A.Lambda(image=clip_image, p=1.0),
     ToTensorV2()
 ]) #type: ignore
 
@@ -117,6 +142,8 @@ class PatchDiscriminator(nn.Module):
 
     def forward(self, img):
         return self.model(img)
+    
+
 
 # --- 3. TRAINING LOOP ---
 def main():
@@ -144,12 +171,12 @@ def main():
     
     criterion_GAN = nn.MSELoss() # LSGAN Loss (More stable than BCE)
     criterion_pixel = nn.L1Loss()
-    
-    scaler = GradScaler()
+    criterion_content = CombinedLoss().to(CFG['device']) # Perceptual Loss for better textures (Optional)
+    scaler = GradScaler('cuda')
     
     # Data
     dataset = MRIDataset(root_dir='.', transform=train_aug)
-    loader = DataLoader(dataset, batch_size=CFG['batch_size'], shuffle=True, num_workers=0) # 0 for Windows safety
+    loader = DataLoader(dataset, batch_size=CFG['batch_size'], shuffle=True, num_workers=6) # 0 for Windows safety
 
     print("Starting GAN Training...")
     
@@ -160,41 +187,43 @@ def main():
         loop = tqdm(loader, desc=f"Ep {epoch+1}")
         
         for imgs, real_targets in loop:
-            imgs = imgs.to(CFG['device'])           # (B, 3, 256, 256)
-            real_targets = real_targets.to(CFG['device']) # (B, 1, 256, 256)
+            imgs = imgs.to(CFG['device'])
+            real_targets = real_targets.to(CFG['device'])
             
-            # --- Train Generator ---
+            # ---------------------
+            #  Train Generator
+            # ---------------------
             opt_G.zero_grad()
-            # with autocast():
-            with torch.amp.autocast('cuda'):
-                # 1. Generate Fake Image
+            with autocast('cuda'):
+                # 1. Generate Fake Image (Sigmoid -> [0, 1])
                 fake_targets = generator(imgs)
                 
-                # 2. Fool the Discriminator? (Adversarial Loss)
-                # We want D to output '1' (Real) for our fakes
+                # 2. Adversarial Loss
                 pred_fake = discriminator(fake_targets)
                 valid = torch.ones_like(pred_fake) 
                 loss_adv = criterion_GAN(pred_fake, valid)
                 
-                # 3. Match the Pixels? (L1 Loss)
-                loss_pix = criterion_pixel(fake_targets, real_targets)
+                # 3. Content Loss (Your new MS-SSIM + L1)
+                # No normalization needed because Sigmoid output is already [0, 1]
+                loss_content = criterion_content(fake_targets, real_targets)
                 
                 # Total Generator Loss
-                loss_G = (CFG['lambda_adv'] * loss_adv) + (CFG['lambda_l1'] * loss_pix)
+                loss_G = (CFG['lambda_adv'] * loss_adv) + (CFG['lambda_content'] * loss_content)
             
             scaler.scale(loss_G).backward()
             scaler.step(opt_G)
             
-            # --- Train Discriminator ---
+            # ---------------------
+            #  Train Discriminator
+            # ---------------------
             opt_D.zero_grad()
-            with autocast():
-                # 1. Real Loss (Should predict 1)
+            with autocast('cuda'):
+                # Real Loss
                 pred_real = discriminator(real_targets)
                 valid = torch.ones_like(pred_real)
                 loss_real = criterion_GAN(pred_real, valid)
                 
-                # 2. Fake Loss (Should predict 0)
-                # Detach fake_targets so we don't backprop into Generator here
+                # Fake Loss
                 pred_fake = discriminator(fake_targets.detach())
                 fake = torch.zeros_like(pred_fake)
                 loss_fake = criterion_GAN(pred_fake, fake)
@@ -203,12 +232,15 @@ def main():
 
             scaler.scale(loss_D).backward()
             scaler.step(opt_D)
+            
             scaler.update()
             
-            loop.set_postfix(G_loss=loss_G.item(), D_loss=loss_D.item())
+            loop.set_postfix(G_content=loss_content.item(), G_adv=loss_adv.item())
+        
+        if loss_content.item() < 0.05: # Arbitrary threshold for saving
+            torch.save(generator.state_dict(), f"NewGan_epoch_best_{loss_content.item():.4f}.pth")
+            print(f"Saved Generator at epoch {epoch+1} with Content Loss: {loss_content.item():.4f}")
             
-        # Save every epoch
-        torch.save(generator.state_dict(), f"gan_generator_epoch{epoch+1}.pth")
-
+        torch.save(generator.state_dict(), f"NewGan_latest.pth")
 if __name__ == '__main__':
     main()

@@ -2,7 +2,6 @@ import os
 import glob
 import numpy as np
 import pandas as pd
-import nibabel as nib
 import torch
 from torch.utils.data import DataLoader, Dataset
 from scipy.ndimage import zoom
@@ -21,17 +20,21 @@ CFG = {
     'img_size': 256,
     'orig_shape': (179, 221),
     'device': 'cuda' if torch.cuda.is_available() else 'cpu',
-    'model_path': 'unet_25d_epoch15.pth' # <--- Ensure this is correct
+    'model_path': 'finetuned_unet_best.pth' 
 }
 
 class InferenceDataset(Dataset):
     def __init__(self, lf_vol):
         self.vol = lf_vol
+        # Fixed PadIfNeeded arguments to avoid warnings
         self.transform = A.Compose([
-            A.PadIfNeeded(min_height=CFG['img_size'], min_width=CFG['img_size'], 
-                          border_mode=cv2.BORDER_CONSTANT, value=0),
+            A.PadIfNeeded(
+                min_height=CFG['img_size'], 
+                min_width=CFG['img_size'], 
+                border_mode=cv2.BORDER_CONSTANT
+            ),
             ToTensorV2()
-        ])
+        ]) #type:ignore
 
     def __len__(self):
         return self.vol.shape[2]
@@ -44,6 +47,7 @@ class InferenceDataset(Dataset):
         return augmented['image'], idx
 
 def upsample_volume(vol):
+    # Mapping low-res volume to high-res target shape
     z_factor = 179 / vol.shape[0]
     y_factor = 221 / vol.shape[1]
     x_factor = 200 / vol.shape[2]
@@ -51,6 +55,7 @@ def upsample_volume(vol):
 
 def predict_volume(model, vol_path):
     vol = load_nifti(vol_path)
+    # Robust normalization
     vol = (vol - vol.min()) / (vol.max() - vol.min() + 1e-8)
     vol = vol.astype(np.float32)
     
@@ -58,11 +63,12 @@ def predict_volume(model, vol_path):
     vol_upsampled = upsample_volume(vol)
     
     dataset = InferenceDataset(vol_upsampled)
-    loader = DataLoader(dataset, batch_size=CFG['batch_size'], shuffle=False, num_workers=4)
+    loader = DataLoader(dataset, batch_size=CFG['batch_size'], shuffle=False, num_workers=0) # num_workers=0 is safer for inference
     
     model.eval()
     predictions = []
     
+    # Calculate padding offsets for center cropping back to original size
     pad_h = (CFG['img_size'] - CFG['orig_shape'][0]) // 2
     pad_w = (CFG['img_size'] - CFG['orig_shape'][1]) // 2
     
@@ -73,11 +79,11 @@ def predict_volume(model, vol_path):
             
             for i in range(preds.shape[0]):
                 p = preds[i, 0, :, :]
+                # Center crop back to 179x221
                 p_cropped = p[pad_h : pad_h + 179, pad_w : pad_w + 221]
                 p_cropped = np.clip(p_cropped, 0, 1)
                 predictions.append(p_cropped)
                 
-    # Stack back into (179, 221, 200)
     return np.stack(predictions, axis=2)
 
 def main():
@@ -93,26 +99,37 @@ def main():
         print(f"Error: Model file {CFG['model_path']} not found!")
         return
 
-    model.load_state_dict(torch.load(CFG['model_path']))
+    # --- REMODELLED LOADING LOGIC ---
+    print(f"Loading weights from {CFG['model_path']}...")
+    checkpoint = torch.load(CFG['model_path'], map_location=CFG['device'])
+    
+    # Check if checkpoint is a dictionary (from our training script) or just weights
+    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+        model.load_state_dict(checkpoint['model_state_dict'])
+    else:
+        model.load_state_dict(checkpoint)
+    
     test_files = sorted(glob.glob(os.path.join('test', 'low_field', '*.nii*')))
     
-    # This dictionary will store our 3D volumes (numpy arrays)
+    if not test_files:
+        print("No test files found in 'test/low_field/'. Check your paths!")
+        return
+
     predictions_dict = {}
     
     for fpath in test_files:
-        # Extract numeric ID, e.g., 'sample_019'
         fname = os.path.basename(fpath)
-        sample_key = fname.split('_lowfield')[0] # result: 'sample_019'
+        # sample_019_lowfield.nii.gz -> sample_019
+        sample_key = fname.split('_lowfield')[0] 
         
         pred_vol = predict_volume(model, fpath)
         predictions_dict[sample_key] = pred_vol
             
-    print("Converting volumes to submission format using competition script...")
-    # This function handles the complex Base64 encoding for you
+    print("Converting volumes to submission format...")
     submission_df = create_submission_df(predictions_dict)
     
     submission_df.to_csv('submission.csv', index=False)
-    print("Done! Saved to submission.csv")
+    print("Done! Submission file saved as 'submission.csv'")
 
 if __name__ == '__main__':
     main()
