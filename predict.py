@@ -128,8 +128,8 @@ def main():
     print("Converting volumes to submission format...")
     submission_df = create_submission_df(predictions_dict)
     
-    submission_df.to_csv('submission.csv', index=False)
-    print("Done! Submission file saved as 'submission.csv'")
+    submission_df.to_csv('submission_2step_2d_unet.csv', index=False)
+    print("Done! Submission file saved as 'submission_2step_2d_unet.csv'")
 
 if __name__ == '__main__':
     main()

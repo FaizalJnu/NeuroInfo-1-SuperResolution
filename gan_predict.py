@@ -13,6 +13,9 @@ from tqdm import tqdm
 import cv2
 from extract_slices import create_submission_df
 
+import nibabel as nib
+import nibabel.processing
+
 # --- CONFIGURATION ---
 CFG = {
     'batch_size': 32,
@@ -20,7 +23,7 @@ CFG = {
     'orig_shape': (179, 221),
     'device': 'cuda' if torch.cuda.is_available() else 'cpu',
     # POINT THIS TO YOUR NEW GAN WEIGHTS
-    'model_path': 'NewGan_epoch_best_0.0490.pth' 
+    'model_path': 'NewGan_epoch_best_0.0493_aligned.pth' 
 }
 
 class InferenceDataset(Dataset):
@@ -75,6 +78,7 @@ def predict_volume(model, vol_path):
     
     print(f"Upsampling {os.path.basename(vol_path)}...")
     vol_upsampled = upsample_volume(vol)
+    # vol_upsampled = upsample_test_volume_affine(vol_path)
     
     dataset = InferenceDataset(vol_upsampled)
     loader = DataLoader(dataset, batch_size=CFG['batch_size'], shuffle=False, num_workers=0) # 0 for Windows
@@ -133,8 +137,8 @@ def main():
     print("Generating GAN submission...")
     submission_df = create_submission_df(predictions_dict)
     
-    submission_df.to_csv('submission_gan.csv', index=False)
-    print("Done! Saved to submission_gan.csv")
+    submission_df.to_csv('submission_gan_aligned.csv', index=False)
+    print("Done! Saved to submission_gan_aligned.csv")
 
 if __name__ == '__main__':
     main()

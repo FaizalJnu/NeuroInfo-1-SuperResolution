@@ -79,10 +79,11 @@ class MRIDataset(Dataset):
         vol_idx, slice_idx, fname = self.samples[idx]
         
         if f'lf_{vol_idx}' not in self.cache:
-            lf_path = os.path.join(self.root_dir, 'train', 'low_field', fname)
+            lf_path = os.path.join(self.root_dir, 'train', 'low_field_aligned', fname)
             hf_path = os.path.join(self.root_dir, 'train', 'high_field', fname.replace('lowfield', 'highfield'))
             
             lf_vol = self.upsample_lf(self.load_volume(lf_path))
+            # lf_vol = self.load_volume(lf_path)
             hf_vol = self.load_volume(hf_path)
             
             self.cache[f'lf_{vol_idx}'] = lf_vol
@@ -238,9 +239,9 @@ def main():
             loop.set_postfix(G_content=loss_content.item(), G_adv=loss_adv.item())
         
         if loss_content.item() < 0.05: # Arbitrary threshold for saving
-            torch.save(generator.state_dict(), f"NewGan_epoch_best_{loss_content.item():.4f}.pth")
+            torch.save(generator.state_dict(), f"NewGan_epoch_best_{loss_content.item():.4f}_aligned.pth")
             print(f"Saved Generator at epoch {epoch+1} with Content Loss: {loss_content.item():.4f}")
             
-        torch.save(generator.state_dict(), f"NewGan_latest.pth")
+        torch.save(generator.state_dict(), f"NewGan_latest_aligned.pth")
 if __name__ == '__main__':
     main()
