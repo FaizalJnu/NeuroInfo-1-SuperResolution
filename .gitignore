@@ -210,13 +210,16 @@ __marimo__/
 *.csv
 *.zip
 
-/test
-/train
+/challenge-1/test
 
-/data
 
-/train_*
-/IXI*
-/brain_*
-/mri-*
+/challenge-1/data
+
+
+/challenge-1/IXI*
+/challenge-1/brain_*
+/challenge-1/mri-*
+
+/challenge-2/long-*
+
 
